@@ -1,0 +1,12 @@
+{
+  "name": "tomstools-mods",
+  "description": "Tom's mods for Claude Code.",
+  "owner": { "name": "TomsTools11", "url": "https://github.com/TomsTools11" },
+  "plugins": [
+    {
+      "name": "command-center",
+      "source": "./",
+      "description": "Command Center: a live pane with context and rate limits, task progress rings, subagent cards and one-click approvals"
+    }
+  ]
+}

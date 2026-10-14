@@ -1,13 +1,14 @@
 import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, RenderChildren, ToolCallResult, SessionContextUsage, SessionRateLimit, ToolCallInput } from 'claude-code'
 
-import type { AgentCard, AgentDetail, AppState, Approval, BackgroundJob, CallStats, Shortcut, Usage } from '../types'
+import type { AgentCard, AgentDetail, AppState, Approval, BackgroundJob, CallStats, Shortcut, SideQuestion, Usage } from '../types'
 
 const PANE = 'command-center'
 const TITLE = 'Command Center'
 
 const usage = atom({ plugin: 'command-center', key: 'usage' } as const, { limits: [] })
 const background = atom({ plugin: 'command-center', key: 'background' } as const, [])
+const side = atom({ plugin: 'command-center', key: 'side' } as const, [])
 const agents = atom({ plugin: 'command-center', key: 'agents' } as const, [])
 const activity = atom({ plugin: 'command-center', key: 'activity' } as const, {})
 const expanded = atom({ plugin: 'command-center', key: 'expanded' } as const, {})
@@ -19,7 +20,7 @@ const layout = atom({ plugin: 'command-center', key: 'layout' } as const, { orde
 
 // The movable cards, top to bottom by default. Approvals is not among them: it always
 // sits at the top while something waits.
-const CARD_ORDER = ['actions', 'context', 'shortcuts', 'background', 'agents', 'activity'] as const
+const CARD_ORDER = ['actions', 'context', 'side', 'shortcuts', 'background', 'agents', 'activity'] as const
 const app = atom({ plugin: 'command-center', key: 'app' } as const, { isAvailable: false, groups: [], isConfirmingArchive: false, isNamingGroup: false })
 const calls = atom({ plugin: 'command-center', key: 'calls' } as const, { total: 0, failed: 0, byTool: {}, recent: [], failures: [] })
 
@@ -595,6 +596,50 @@ function activityMiniSvg(data: [number, number][]): string {
 }
 const ACTIVITY_MINI = { width: 160, height: 18 } as const
 
+// ---- side questions, as /btw asks them ----
+
+const SIDE_KEPT = 5
+
+// What the side-question field holds. The module's own, not $.state: a redraw (a tool
+// call, a timer) would otherwise empty the field mid-typing.
+let sideDraft = ''
+
+// Asks one side question over the session's own transcript, as /btw does: a fork of the
+// main thread's last request with the question after it, every tool denied. Nothing is
+// added to the conversation; the answer lands in the card.
+function askSide($: EngineInterface, question: string) {
+  const id = `${Date.now()}`
+  const item: SideQuestion = { id, question, status: 'asking', t: Date.now() }
+  void update($, side, list => [item, ...list].slice(0, SIDE_KEPT))
+  const settle = (patch: Partial<SideQuestion>) =>
+    void update($, side, list => list.map(q => (q.id === id ? { ...q, ...patch } : q)))
+  $.clock.after(1, () =>
+    void $.model
+      .fork({
+        prompt:
+          'A quick side question from the user, asked from the Command Center pane. It is not part of the ' +
+          'task: answer briefly from what you already know of this conversation, without using tools, and ' +
+          `do not carry it into your work.\n\n${question}`,
+      })
+      .then(r => {
+        if (r.isAnswered) settle({ status: 'answered', answer: r.text.trim() })
+        else
+          settle({
+            status: 'failed',
+            answer:
+              r.reason === 'nothing-to-fork'
+                ? 'Side questions work once Claude has replied at least once in this session.'
+                : r.reason === 'api-error'
+                  ? `The request failed${r.status ? ` (${r.status})` : ''}. Try again.`
+                  : r.reason === 'aborted'
+                    ? 'Cancelled.'
+                    : 'No answer came back. Try rephrasing.',
+          })
+      })
+      .catch((error: unknown) => settle({ status: 'failed', answer: error instanceof Error ? error.message : String(error) })),
+  )
+}
+
 export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
@@ -794,12 +839,14 @@ export const register: Register = on => {
     const { Box, Text, Button } = table
     const Select = 'Select' in table ? table.Select : undefined
     const Input = 'Input' in table ? table.Input : undefined
+    const { Markdown } = table
     // The terminal draws no SVG: there, meters are block bars and rings are glyphs.
     const Svg = e.surface !== 'terminal' && 'Svg' in table ? table.Svg : undefined
     const now = Date.now()
 
     const u = await read($, usage)
     const jobs = await read($, background)
+    const asked = await read($, side)
     const agentList = await read($, agents)
     const acts = await read($, activity)
     const opened = await read($, expanded)
@@ -816,6 +863,7 @@ export const register: Register = on => {
     const isShown: Record<string, boolean> = {
       actions: appState.isAvailable,
       shortcuts: shortcutList.length > 0,
+      side: Input !== undefined || asked.length > 0,
     }
     const shownOrder = () => order.filter(id => isShown[id] !== false)
 
@@ -1148,6 +1196,62 @@ export const register: Register = on => {
       ),
     )
 
+    const isAsking = asked.some(q => q.status === 'asking')
+    const sideCard = card(
+      'card:side',
+      'Side question',
+      isAsking ? 'thinking…' : '',
+      <Box flexDirection="column" gap={1}>
+        {Input && (
+          <Input
+            key="side-input"
+            placeholder="Ask about this session without interrupting it…"
+            submitLabel="Ask"
+            value={sideDraft}
+            onInput={value => {
+              sideDraft = value
+            }}
+            onSubmit={value => {
+              const question = value.trim()
+              sideDraft = ''
+              if (question !== '') askSide($, question)
+            }}
+          />
+        )}
+        {asked.length === 0 ? (
+          <Text dimColor>Answers come from a copy of the conversation, like /btw: nothing is added to the chat.</Text>
+        ) : (
+          asked.map((q, i) => (
+            <Box key={`side:${q.id}`} flexDirection="column">
+              <Text bold dimColor={i > 0} wrap="wrap">
+                {q.question}
+              </Text>
+              {q.status === 'asking' ? (
+                <Text color={LEVEL_HEX.ok}>Thinking…</Text>
+              ) : q.status === 'failed' ? (
+                <Text color="error" wrap="wrap">
+                  {q.answer}
+                </Text>
+              ) : i === 0 ? (
+                <Markdown key={`side-answer:${q.id}`} text={q.answer ?? ''} />
+              ) : (
+                <Text dimColor wrap="wrap">
+                  {clipBlock(q.answer ?? '', 160)}
+                </Text>
+              )}
+            </Box>
+          ))
+        )}
+        {asked.length > 0 && !isAsking && (
+          <Box flexDirection="row" justifyContent="flex-end">
+            <Button key="side-clear" plain dimColor onPress={() => void update($, side, () => [])}>
+              Clear
+            </Button>
+          </Box>
+        )}
+      </Box>,
+    )
+
     const roomy = (e.props.bodyColumns ?? e.viewport?.columns ?? 0) >= EXTRAS_MIN_COLUMNS
     const shown = shortcutList.filter(sc => roomy || !sc.isExtra)
     const shortcutsCard =
@@ -1395,6 +1499,7 @@ export const register: Register = on => {
       context: contextCard,
       shortcuts: shortcutsCard,
       background: backgroundCard,
+      side: sideCard,
       agents: agentsCard,
       activity: activityCard,
     }

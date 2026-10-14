@@ -484,7 +484,7 @@ test('Arrange moves cards up and down, saves the order, and the title toggles th
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect(await heads(ui)).toEqual(['fold:context', 'fold:shortcuts', 'fold:background', 'fold:agents', 'fold:activity'])
+    expect(await heads(ui)).toEqual(['fold:context', 'fold:side', 'fold:shortcuts', 'fold:background', 'fold:agents', 'fold:activity'])
     expect(await ui.find({ type: 'Button', key: 'up:activity' })).toBeUndefined()
     await ui.unmount()
   }
@@ -492,11 +492,11 @@ test('Arrange moves cards up and down, saves the order, and the title toggles th
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'arrange' })
   expect(await ui.find({ type: 'Button', key: 'up:context' })).toBeUndefined()
-  for (let i = 0; i < 4; i++) await ui.press({ key: 'up:activity' })
+  for (let i = 0; i < 5; i++) await ui.press({ key: 'up:activity' })
   expect(await ui.find({ type: 'Button', key: 'up:activity' })).toBeUndefined()
   await ui.press({ key: 'down:context' })
-  expect(await heads(ui)).toEqual(['fold:activity', 'fold:shortcuts', 'fold:context', 'fold:background', 'fold:agents'])
-  expect(stored.get('order')).toEqual(['actions', 'activity', 'shortcuts', 'context', 'background', 'agents'])
+  expect(await heads(ui)).toEqual(['fold:activity', 'fold:side', 'fold:context', 'fold:shortcuts', 'fold:background', 'fold:agents'])
+  expect(stored.get('order')).toEqual(['actions', 'activity', 'side', 'context', 'shortcuts', 'background', 'agents'])
   await ui.press({ key: 'arrange' })
   expect(await ui.find({ type: 'Button', key: 'up:context' })).toBeUndefined()
 
@@ -602,5 +602,45 @@ test('the minimized Activity card keeps its counts and shows only a strip of tin
 
   const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await term.find({ type: 'Text', text: /^[·▁▂▃▄▅▆▇█]{20}$/ })).toBeDefined()
+  await term.unmount()
+})
+
+test('a side question is answered from a fork of the session, like /btw, and the chat is left alone', async ($, on) => {
+  const clock = mock.clock(on, { now: Date.now() })
+  const asked: string[] = []
+  on('model.fork', async (_$, e) => {
+    asked.push(e.prompt)
+    return e.prompt.endsWith('which file?')
+      ? { value: { isAnswered: true, text: 'It is **hooks/register.tsx**.', usage: {} } as never }
+      : { value: { isAnswered: false, reason: 'nothing-to-fork' } as never }
+  })
+  const submitted: string[] = []
+  on('prompt.submit', async (_$, e) => {
+    submitted.push(e.text)
+    return {} as never
+  })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Input', key: 'side-input' })).toBeDefined()
+  await ui.input({ key: 'side-input', text: 'which file?' })
+  expect(await ui.find({ type: 'Text', text: 'Thinking…' })).toBeDefined()
+  await clock.advance(10)
+  expect(asked[0]).toMatch(/side question[\s\S]*which file\?$/)
+  expect(await ui.find({ type: 'Text', text: 'which file?' })).toBeDefined()
+  expect(await ui.find({ type: 'Markdown', text: /hooks\/register\.tsx/ })).toBeDefined()
+  expect(submitted).toEqual([])
+
+  // The newest answer is on top; one with nothing to fork says why.
+  await ui.input({ key: 'side-input', text: 'too early?' })
+  await clock.advance(10)
+  expect(await ui.find({ type: 'Text', text: /once Claude has replied/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /It is \*\*hooks\/register\.tsx\*\*/ })).toBeDefined()
+
+  await ui.press({ key: 'side-clear' })
+  expect(await ui.find({ type: 'Text', text: 'which file?' })).toBeUndefined()
+  await ui.unmount()
+
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await term.find({ type: 'Input', key: 'side-input' })).toBeDefined()
   await term.unmount()
 })

@@ -1,6 +1,6 @@
 {
   "name": "command-center",
-  "version": "0.3.0",
-  "description": "Command Center: a live pane with context and rate limits, task progress rings, subagent cards and one-click approvals",
+  "version": "0.4.0",
+  "description": "Command Center: a live pane with context and plan limits, background work, subagent details, side questions, approvals and quick actions",
   "types": "./types/index.d.ts"
 }

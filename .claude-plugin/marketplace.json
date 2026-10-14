@@ -6,7 +6,7 @@
     {
       "name": "command-center",
       "source": "./",
-      "description": "Command Center: a live pane with context and rate limits, task progress rings, subagent cards and one-click approvals"
+      "description": "Command Center: a live pane with context and plan limits, background work, subagent details, side questions, approvals and quick actions"
     }
   ]
 }

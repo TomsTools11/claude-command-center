@@ -50,6 +50,13 @@ export type AppState = {
   isConfirmingArchive: boolean
   isNamingGroup: boolean
 }
+export type SideQuestion = {
+  id: string
+  question: string
+  answer?: string
+  status: 'asking' | 'answered' | 'failed'
+  t: number
+}
 export type Shortcut = { label: string; command: string; isExtra: boolean }
 export type CallStats = {
   total: number
@@ -64,6 +71,7 @@ declare module 'claude-code' {
     'command-center': {
       usage: Usage
       background: BackgroundJob[]
+      side: SideQuestion[]
       agents: AgentCard[]
       activity: AgentActivity
       expanded: Record<string, boolean>

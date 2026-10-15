@@ -426,7 +426,11 @@ function planStatus(value: unknown): PlanStep['status'] {
   return value === 'completed' || value === 'in_progress' ? value : 'pending'
 }
 
-function applyPlan(steps: readonly PlanStep[], tool: string, input: Record<string, unknown>): PlanStep[] {
+function applyPlan(steps: readonly PlanStep[], tool: string, input: Record<string, unknown>, now: number): PlanStep[] {
+  return stampPlan(steps, nextPlan(steps, tool, input), now)
+}
+
+function nextPlan(steps: readonly PlanStep[], tool: string, input: Record<string, unknown>): PlanStep[] {
   if (tool.endsWith('__wrap_up')) return steps.map(s => ({ ...s, status: 'completed' as const }))
   const next = Array.isArray(input.items)
     ? input.items.flatMap(item => {
@@ -447,6 +451,36 @@ function applyPlan(steps: readonly PlanStep[], tool: string, input: Record<strin
   if (Array.isArray(input.done)) for (const n of input.done) if (typeof n === 'number') set(n - 1, 'completed')
   if (typeof input.start === 'number') set(input.start - 1, 'in_progress')
   return next
+}
+
+// Times each step from the last list, matched by its text (a whole new list often
+// repeats the steps): started when it goes in progress, ended when it is done.
+function stampPlan(prior: readonly PlanStep[], next: readonly PlanStep[], now: number): PlanStep[] {
+  return next.map(step => {
+    const was = prior.find(p => p.content === step.content)
+    const { content, status } = step
+    if (status === 'pending') return { content, status }
+    const startedAt = status === 'in_progress' && was?.status !== 'in_progress' ? now : was?.startedAt
+    const endedAt = status === 'completed' ? (was?.status === 'completed' ? was.endedAt : now) : undefined
+    return { content, status, startedAt, endedAt }
+  })
+}
+
+// How far along the step under way is, estimated: its time so far against the average
+// of the steps done before it, held under 90% until it is done. Undefined with no
+// finished step to go by.
+function stepEstimate(steps: readonly PlanStep[], step: PlanStep, now: number): { pct: number; typical: number } | undefined {
+  const took = steps.flatMap(s =>
+    s.status === 'completed' && s.startedAt !== undefined && s.endedAt !== undefined ? [s.endedAt - s.startedAt] : [],
+  )
+  if (took.length === 0 || step.startedAt === undefined) return undefined
+  const typical = took.reduce((a, b) => a + b, 0) / took.length
+  return { pct: Math.min(90, typical > 0 ? ((now - step.startedAt) / typical) * 100 : 90), typical }
+}
+
+// A step's time, as elapsed() puts it; the pane redraws every 30s, so no seconds.
+function stepTime(ms: number): string {
+  return ms < 60000 ? '<1m' : elapsed(ms)
 }
 
 async function logCall($: EngineInterface, tool: string, label: string, ok: boolean) {
@@ -630,19 +664,22 @@ function activityMiniSvg(data: [number, number][]): string {
 }
 const ACTIVITY_MINI = { width: 160, height: 18 } as const
 
-// The minimized Plan card's progress: a thin rounded bar, filled in the accent.
-function planBarSvg(pct: number): string {
-  const { width: w, height: h } = PLAN_BAR
+// A Plan progress bar: a thin rounded track filled in the accent.
+function planBarSvg(pct: number, size: { width: number; height: number } = PLAN_BAR): string {
+  const { width: w, height: h } = size
   const filled = (Math.max(0, Math.min(100, pct)) / 100) * w
+  const fill = filled > 0 ? `<rect width="${Math.max(h, filled).toFixed(1)}" height="${h}" rx="${h / 2}" fill="${LEVEL_HEX.ok}"/>` : ''
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
     '<style>.k{fill:#1f1e1c;fill-opacity:.12}@media (prefers-color-scheme: dark){.k{fill:#ffffff;fill-opacity:.12}}</style>' +
     `<rect class="k" width="${w}" height="${h}" rx="${h / 2}"/>` +
-    (filled > 0 ? `<rect width="${Math.max(h, filled).toFixed(1)}" height="${h}" rx="${h / 2}" fill="${LEVEL_HEX.ok}"/>` : '') +
+    fill +
     '</svg>'
   )
 }
 const PLAN_BAR = { width: 160, height: 6 } as const
+const PLAN_STEP_BAR = { width: 160, height: 4 } as const
+const PLAN_STEP_ALT: Record<PlanStep['status'], string> = { completed: 'Done', in_progress: 'In progress', pending: 'Not started' }
 const PLAN_MARK: Record<PlanStep['status'], string> = { completed: '✓', in_progress: '●', pending: '○' }
 
 // ---- side questions, as /btw asks them ----
@@ -795,7 +832,8 @@ export const register: Register = on => {
     if (ran.deny === undefined && ran.isError !== true) await trackBackground($, e, ran.result)
     if (ran.deny === undefined && ran.isError !== true && !agentId && PLAN_TOOL.test(e.tool)) {
       const input = e as unknown as Record<string, unknown>
-      await update($, plan, p => ({ steps: applyPlan(p.steps, e.tool, input), updatedAt: Date.now() }))
+      const at = await $.clock.now()
+      await update($, plan, p => ({ steps: applyPlan(p.steps, e.tool, input, at), updatedAt: at }))
     }
     if (e.tool === 'Agent' || e.agentId) void refreshAgents($).catch(() => undefined)
     return ran
@@ -1554,13 +1592,14 @@ export const register: Register = on => {
     const isPlanDone = steps.length > 0 && doneSteps === steps.length
     const currentStep = steps.find(s => s.status === 'in_progress') ?? steps.find(s => s.status === 'pending')
     const planPct = steps.length === 0 ? 0 : (doneSteps / steps.length) * 100
+    const planClock = steps.some(s => s.status !== 'pending') ? await $.clock.now() : now
     const planCard =
       steps.length > 0 &&
       card(
         'card:plan',
         'Plan',
         `${doneSteps}/${steps.length}${isPlanDone ? ' · done' : ''}`,
-        <Box flexDirection="column">
+        <Box flexDirection="column" gap={1}>
           {steps.map((step, i) => (
             <Box key={`step:${i}`} flexDirection="row" gap={1}>
               <Text
@@ -1569,10 +1608,40 @@ export const register: Register = on => {
               >
                 {PLAN_MARK[step.status]}
               </Text>
+              {/* The step, and under it its own bar: full when done, empty until started,
+                  and a sliding segment while under way. */}
               <Box flexDirection="column" flexGrow={1} flexShrink={1}>
                 <Text bold={step.status === 'in_progress'} dimColor={step.status === 'completed'} wrap="wrap">
                   {step.content}
                 </Text>
+                {(() => {
+                  const estimate = step.status === 'in_progress' ? stepEstimate(steps, step, planClock) : undefined
+                  const pct = step.status === 'completed' ? 100 : (estimate?.pct ?? 0)
+                  const time =
+                    step.status === 'completed' && step.startedAt !== undefined && step.endedAt !== undefined
+                      ? stepTime(step.endedAt - step.startedAt)
+                      : step.status === 'in_progress' && step.startedAt !== undefined
+                        ? `${stepTime(planClock - step.startedAt)}${estimate ? ` · est. ~${stepTime(estimate.typical)}` : ''}`
+                        : ''
+                  const alt =
+                    step.status === 'in_progress'
+                      ? estimate
+                        ? `In progress, about ${Math.round(estimate.pct)}% by time (estimate)`
+                        : 'In progress'
+                      : PLAN_STEP_ALT[step.status]
+                  return (
+                    <Box flexDirection="row" gap={1} alignItems="center">
+                      {Svg ? (
+                        <Svg source={planBarSvg(pct, PLAN_STEP_BAR)} width={PLAN_STEP_BAR.width} height={PLAN_STEP_BAR.height} alt={alt} />
+                      ) : (
+                        <Text color={LEVEL_HEX.ok} dimColor={step.status === 'pending'}>
+                          {bar(pct)}
+                        </Text>
+                      )}
+                      {time !== '' && <Text dimColor>{time}</Text>}
+                    </Box>
+                  )
+                })()}
               </Box>
             </Box>
           ))}

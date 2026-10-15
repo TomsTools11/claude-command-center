@@ -59,7 +59,13 @@ export type SideQuestion = {
 }
 export type Shortcut = { label: string; command: string; isExtra: boolean }
 /** One step of the desktop app's task list, as Claude last set it. */
-export type PlanStep = { content: string; status: 'pending' | 'in_progress' | 'completed' }
+export type PlanStep = {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+  /** When it went in progress, and when it was done, by `$.clock.now()`. */
+  startedAt?: number
+  endedAt?: number
+}
 export type Plan = { steps: PlanStep[]; updatedAt?: number }
 export type CallStats = {
   total: number

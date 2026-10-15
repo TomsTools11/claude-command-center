@@ -646,7 +646,7 @@ test('a side question is answered from a fork of the session, like /btw, and the
 })
 
 test('the Plan card follows the task list Claude sets, advances it, and checks it off at wrap-up', async ($, on) => {
-  mock.clock(on, { now: Date.now() })
+  const clock = mock.clock(on, { now: Date.now() })
   // A saved order from before the card existed: Plan still comes first.
   on('store.get', async (_$, e) => ({ value: e.key === 'order' ? ['activity', 'context'] : undefined }))
   on('store.set', async () => ({ value: undefined }))
@@ -679,10 +679,22 @@ test('the Plan card follows the task list Claude sets, advances it, and checks i
     await ui.unmount()
   }
 
+  // The first step takes 3 minutes; the second has run 1½ when the pane is drawn.
+  await clock.advance(3 * 60000)
   await call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+  await clock.advance(90000)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await ui.find({ type: 'Text', text: '1/3' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Build the map data', bold: true } as never)).toBeDefined()
+
+  // Each step has its own bar: full when done, filled by time against the steps done
+  // before it while under way (an estimate), empty until started.
+  const alts = (await ui.findAll({ type: 'Svg' })).map(b => (b as { props?: { alt?: string } }).props?.alt)
+  expect(alts).toContain('Done')
+  expect(alts).toContain('In progress, about 50% by time (estimate)')
+  expect(alts).toContain('Not started')
+  expect(await ui.find({ type: 'Text', text: '3m' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1m · est. ~3m' })).toBeDefined()
 
   // Minimized: the step under way and a progress bar.
   await ui.press({ key: 'fold:plan' })
@@ -696,6 +708,8 @@ test('the Plan card follows the task list Claude sets, advances it, and checks i
   await call({ tool: 'mcp__ccd_turn__update_plan', done: [2], start: 3 })
   const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await term.find({ type: 'Text', text: '2/3' })).toBeDefined()
+  // Just started: under a minute, against the average of the two done (3m and 1½m).
+  expect(await term.find({ type: 'Text', text: '<1m · est. ~2m' })).toBeDefined()
   expect(await term.find({ type: 'Text', text: 'Review and deliver', bold: true } as never)).toBeDefined()
   await term.unmount()
 

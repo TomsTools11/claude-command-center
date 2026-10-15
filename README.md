@@ -1,11 +1,12 @@
 # Command Center
 
-A Claude Code mod: a live side pane for the session you're in. It shows context and plan limits, background work, subagents, side questions, approvals and quick actions.
+A Claude Code mod: a live side pane for the session you're in. It shows Claude's task list, context and plan limits, background work, subagents, side questions, approvals and quick actions.
 
 ## Cards
 
 | Card | What it shows and does |
 | --- | --- |
+| **Plan** | The task list Claude keeps during a turn: done steps checked, the current one highlighted, with a done/total count. Minimized, it shows the current step and a progress bar. Appears once Claude sets a plan; desktop app only. |
 | **Actions** | Pin or unpin the session, move it to a sidebar group or create a new group, archive it (with a confirm step), and hide or show the sidebar. Desktop app only. |
 | **Approvals** | Appears only when a permission prompt is waiting: Approve, Deny, or hand it back to the dialog. Always on top. |
 | **Session** | Running time and cost in the header, with context, 5-hour and 7-day usage bars and a Compact button. Minimized, it shows three small rings instead. |

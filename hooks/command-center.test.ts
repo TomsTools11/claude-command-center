@@ -496,7 +496,7 @@ test('Arrange moves cards up and down, saves the order, and the title toggles th
   expect(await ui.find({ type: 'Button', key: 'up:activity' })).toBeUndefined()
   await ui.press({ key: 'down:context' })
   expect(await heads(ui)).toEqual(['fold:activity', 'fold:side', 'fold:context', 'fold:shortcuts', 'fold:background', 'fold:agents'])
-  expect(stored.get('order')).toEqual(['actions', 'activity', 'side', 'context', 'shortcuts', 'background', 'agents'])
+  expect(stored.get('order')).toEqual(['plan', 'actions', 'activity', 'side', 'context', 'shortcuts', 'background', 'agents'])
   await ui.press({ key: 'arrange' })
   expect(await ui.find({ type: 'Button', key: 'up:context' })).toBeUndefined()
 
@@ -643,4 +643,74 @@ test('a side question is answered from a fork of the session, like /btw, and the
   const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await term.find({ type: 'Input', key: 'side-input' })).toBeDefined()
   await term.unmount()
+})
+
+test('the Plan card follows the task list Claude sets, advances it, and checks it off at wrap-up', async ($, on) => {
+  mock.clock(on, { now: Date.now() })
+  // A saved order from before the card existed: Plan still comes first.
+  on('store.get', async (_$, e) => ({ value: e.key === 'order' ? ['activity', 'context'] : undefined }))
+  on('store.set', async () => ({ value: undefined }))
+  startStubs(on)
+  on('tool.call', async () => ({ result: {} as never }))
+  await $.session.start({ cwd: '/repo', source: 'startup' } as never)
+  const { call } = $.tool as never as { call: (args: object) => Promise<unknown> }
+
+  // No plan yet: no card.
+  const empty = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await empty.find({ type: 'Button', key: 'fold:plan' })).toBeUndefined()
+  await empty.unmount()
+
+  await call({
+    tool: 'mcp__ccd_turn__update_plan',
+    items: [
+      { content: 'Find the research', status: 'in_progress' },
+      { content: 'Build the map data', status: 'pending' },
+      { content: 'Review and deliver', status: 'pending' },
+    ],
+    scope: 'first_task',
+  })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    const keys = (await ui.findAll({ type: 'Button', text: /^[▾▸] {2}/ })).map(b => b.key)
+    expect(keys.slice(0, 3)).toEqual(['fold:plan', 'fold:activity', 'fold:context'])
+    expect(await ui.find({ type: 'Text', text: '0/3' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Find the research', bold: true } as never)).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: 'Review and deliver' })).toBeDefined()
+    await ui.unmount()
+  }
+
+  await call({ tool: 'mcp__ccd_turn__update_plan', advance: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: '1/3' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Build the map data', bold: true } as never)).toBeDefined()
+
+  // Minimized: the step under way and a progress bar.
+  await ui.press({ key: 'fold:plan' })
+  expect(await ui.find({ type: 'Text', text: 'Build the map data' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Review and deliver' })).toBeUndefined()
+  expect(JSON.stringify(await ui.drawn())).toContain('1 of 3 steps done')
+  await ui.press({ key: 'fold:plan' })
+  await ui.unmount()
+
+  // Out of order: step 2 done, step 3 started.
+  await call({ tool: 'mcp__ccd_turn__update_plan', done: [2], start: 3 })
+  const term = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await term.find({ type: 'Text', text: '2/3' })).toBeDefined()
+  expect(await term.find({ type: 'Text', text: 'Review and deliver', bold: true } as never)).toBeDefined()
+  await term.unmount()
+
+  // A subagent's call leaves the list alone.
+  await call({ tool: 'mcp__ccd_turn__update_plan', items: [{ content: 'Not mine', status: 'pending' }], agentId: 'a1' })
+  await call({ tool: 'mcp__ccd_turn__wrap_up', recap: 'Done.' })
+  const done = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await done.find({ type: 'Text', text: '3/3 · done' })).toBeDefined()
+  expect(await done.find({ type: 'Text', text: 'Not mine' })).toBeUndefined()
+  await done.unmount()
+
+  // A new list replaces the old one.
+  await call({ tool: 'mcp__ccd_turn__update_plan', items: [{ content: 'Next task', status: 'in_progress' }], scope: 'continuation' })
+  const fresh = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await fresh.find({ type: 'Text', text: '0/1' })).toBeDefined()
+  expect(await fresh.find({ type: 'Text', text: 'Find the research' })).toBeUndefined()
+  await fresh.unmount()
 })

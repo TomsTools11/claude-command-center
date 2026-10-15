@@ -58,6 +58,9 @@ export type SideQuestion = {
   t: number
 }
 export type Shortcut = { label: string; command: string; isExtra: boolean }
+/** One step of the desktop app's task list, as Claude last set it. */
+export type PlanStep = { content: string; status: 'pending' | 'in_progress' | 'completed' }
+export type Plan = { steps: PlanStep[]; updatedAt?: number }
 export type CallStats = {
   total: number
   failed: number
@@ -78,6 +81,7 @@ declare module 'claude-code' {
       approvals: Approval[]
       session: SessionInfo
       shortcuts: Shortcut[]
+      plan: Plan
       calls: CallStats
       collapsed: Record<string, boolean>
       layout: { order: string[]; isArranging: boolean }

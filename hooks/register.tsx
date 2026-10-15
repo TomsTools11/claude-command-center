@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Color, EngineInterface, Register, RenderChildren, ToolCallResult, SessionContextUsage, SessionRateLimit, ToolCallInput } from 'claude-code'
 
-import type { AgentCard, AgentDetail, AppState, Approval, BackgroundJob, CallStats, Shortcut, SideQuestion, Usage } from '../types'
+import type { AgentCard, AgentDetail, AppState, Approval, BackgroundJob, CallStats, PlanStep, Shortcut, SideQuestion, Usage } from '../types'
 
 const PANE = 'command-center'
 const TITLE = 'Command Center'
@@ -15,12 +15,13 @@ const expanded = atom({ plugin: 'command-center', key: 'expanded' } as const, {}
 const approvals = atom({ plugin: 'command-center', key: 'approvals' } as const, [])
 const session = atom({ plugin: 'command-center', key: 'session' } as const, { isWorking: false, isCompacting: false, tick: 0 })
 const shortcuts = atom({ plugin: 'command-center', key: 'shortcuts' } as const, [])
+const plan = atom({ plugin: 'command-center', key: 'plan' } as const, { steps: [] })
 const collapsed = atom({ plugin: 'command-center', key: 'collapsed' } as const, {})
 const layout = atom({ plugin: 'command-center', key: 'layout' } as const, { order: [], isArranging: false })
 
 // The movable cards, top to bottom by default. Approvals is not among them: it always
 // sits at the top while something waits.
-const CARD_ORDER = ['actions', 'context', 'side', 'shortcuts', 'background', 'agents', 'activity'] as const
+const CARD_ORDER = ['plan', 'actions', 'context', 'side', 'shortcuts', 'background', 'agents', 'activity'] as const
 const app = atom({ plugin: 'command-center', key: 'app' } as const, { isAvailable: false, groups: [], isConfirmingArchive: false, isNamingGroup: false })
 const calls = atom({ plugin: 'command-center', key: 'calls' } as const, { total: 0, failed: 0, byTool: {}, recent: [], failures: [] })
 
@@ -382,12 +383,14 @@ function runCommand($: EngineInterface, command: string, args: string, done?: (t
 }
 
 // Minimizes or restores one card, remembered across sessions.
-// The saved order, any card it lacks (one added since) after it in default order.
+// The saved order, any card it lacks (one added since) after it in default order,
+// except one whose default place is the top: that goes first.
 function orderOf(saved: readonly string[]): string[] {
   const known = saved
     .map(id => (id === 'tasks' ? 'background' : id))
     .filter(id => (CARD_ORDER as readonly string[]).includes(id))
-  return [...new Set([...known, ...CARD_ORDER])]
+  const top = known.includes(CARD_ORDER[0]) ? [] : [CARD_ORDER[0]]
+  return [...new Set([...top, ...known, ...CARD_ORDER])]
 }
 
 // Swaps a card with its neighbour among the cards drawn (`shown`), up (-1) or down (+1).
@@ -413,6 +416,37 @@ async function resetOrder($: EngineInterface) {
 async function toggleCard($: EngineInterface, id: string) {
   const next = await update($, collapsed, all => ({ ...all, [id]: !all[id] }))
   await $.store.set('collapsed', next).catch(() => undefined)
+}
+
+// The desktop app's task list: Claude sets it with update_plan (a whole list, an
+// advance, or steps done and started) and wrap_up checks off what is left.
+const PLAN_TOOL = /^mcp__ccd_turn__(update_plan|wrap_up)$/
+
+function planStatus(value: unknown): PlanStep['status'] {
+  return value === 'completed' || value === 'in_progress' ? value : 'pending'
+}
+
+function applyPlan(steps: readonly PlanStep[], tool: string, input: Record<string, unknown>): PlanStep[] {
+  if (tool.endsWith('__wrap_up')) return steps.map(s => ({ ...s, status: 'completed' as const }))
+  const next = Array.isArray(input.items)
+    ? input.items.flatMap(item => {
+        const i = (item ?? {}) as Record<string, unknown>
+        return typeof i.content === 'string' ? [{ content: i.content, status: planStatus(i.status) }] : []
+      })
+    : steps.slice()
+  const set = (index: number, status: PlanStep['status']) => {
+    const step = next[index]
+    if (step) next[index] = { ...step, status }
+  }
+  if (input.advance === true) {
+    const at = next.findIndex(s => s.status === 'in_progress')
+    set(at, 'completed')
+    const after = next.findIndex((s, i) => i > at && s.status === 'pending')
+    set(after >= 0 ? after : next.findIndex(s => s.status === 'pending'), 'in_progress')
+  }
+  if (Array.isArray(input.done)) for (const n of input.done) if (typeof n === 'number') set(n - 1, 'completed')
+  if (typeof input.start === 'number') set(input.start - 1, 'in_progress')
+  return next
 }
 
 async function logCall($: EngineInterface, tool: string, label: string, ok: boolean) {
@@ -596,6 +630,21 @@ function activityMiniSvg(data: [number, number][]): string {
 }
 const ACTIVITY_MINI = { width: 160, height: 18 } as const
 
+// The minimized Plan card's progress: a thin rounded bar, filled in the accent.
+function planBarSvg(pct: number): string {
+  const { width: w, height: h } = PLAN_BAR
+  const filled = (Math.max(0, Math.min(100, pct)) / 100) * w
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    '<style>.k{fill:#1f1e1c;fill-opacity:.12}@media (prefers-color-scheme: dark){.k{fill:#ffffff;fill-opacity:.12}}</style>' +
+    `<rect class="k" width="${w}" height="${h}" rx="${h / 2}"/>` +
+    (filled > 0 ? `<rect width="${Math.max(h, filled).toFixed(1)}" height="${h}" rx="${h / 2}" fill="${LEVEL_HEX.ok}"/>` : '') +
+    '</svg>'
+  )
+}
+const PLAN_BAR = { width: 160, height: 6 } as const
+const PLAN_MARK: Record<PlanStep['status'], string> = { completed: '✓', in_progress: '●', pending: '○' }
+
 // ---- side questions, as /btw asks them ----
 
 const SIDE_KEPT = 5
@@ -744,6 +793,10 @@ export const register: Register = on => {
     await logCall($, e.tool, describe(e.tool, e), ran.deny === undefined && ran.isError !== true)
 
     if (ran.deny === undefined && ran.isError !== true) await trackBackground($, e, ran.result)
+    if (ran.deny === undefined && ran.isError !== true && !agentId && PLAN_TOOL.test(e.tool)) {
+      const input = e as unknown as Record<string, unknown>
+      await update($, plan, p => ({ steps: applyPlan(p.steps, e.tool, input), updatedAt: Date.now() }))
+    }
     if (e.tool === 'Agent' || e.agentId) void refreshAgents($).catch(() => undefined)
     return ran
   })
@@ -853,6 +906,7 @@ export const register: Register = on => {
     const pending = await read($, approvals)
     const sess = await read($, session)
     const shortcutList = await read($, shortcuts)
+    const planNow = await read($, plan)
     const stats = await read($, calls)
     const folded = await read($, collapsed)
     const appState = await read($, app)
@@ -861,6 +915,7 @@ export const register: Register = on => {
     // The cards drawn this time, in order (Actions is absent in a terminal, Shortcuts
     // when none resolved); the arrows move a card past its drawn neighbours only.
     const isShown: Record<string, boolean> = {
+      plan: planNow.steps.length > 0,
       actions: appState.isAvailable,
       shortcuts: shortcutList.length > 0,
       side: Input !== undefined || asked.length > 0,
@@ -1494,7 +1549,50 @@ export const register: Register = on => {
       ),
     )
 
+    const steps = planNow.steps
+    const doneSteps = steps.filter(s => s.status === 'completed').length
+    const isPlanDone = steps.length > 0 && doneSteps === steps.length
+    const currentStep = steps.find(s => s.status === 'in_progress') ?? steps.find(s => s.status === 'pending')
+    const planPct = steps.length === 0 ? 0 : (doneSteps / steps.length) * 100
+    const planCard =
+      steps.length > 0 &&
+      card(
+        'card:plan',
+        'Plan',
+        `${doneSteps}/${steps.length}${isPlanDone ? ' · done' : ''}`,
+        <Box flexDirection="column">
+          {steps.map((step, i) => (
+            <Box key={`step:${i}`} flexDirection="row" gap={1}>
+              <Text
+                color={step.status === 'in_progress' ? LEVEL_HEX.ok : undefined}
+                dimColor={step.status !== 'in_progress'}
+              >
+                {PLAN_MARK[step.status]}
+              </Text>
+              <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+                <Text bold={step.status === 'in_progress'} dimColor={step.status === 'completed'} wrap="wrap">
+                  {step.content}
+                </Text>
+              </Box>
+            </Box>
+          ))}
+        </Box>,
+        undefined,
+        // Minimized: the step under way and a progress bar.
+        <Box flexDirection="column">
+          <Text dimColor={isPlanDone} wrap="truncate-end">
+            {isPlanDone ? 'All steps done' : (currentStep?.content ?? '')}
+          </Text>
+          {Svg ? (
+            <Svg source={planBarSvg(planPct)} width={PLAN_BAR.width} height={PLAN_BAR.height} alt={`${doneSteps} of ${steps.length} steps done`} />
+          ) : (
+            <Text color={LEVEL_HEX.ok}>{bar(planPct)}</Text>
+          )}
+        </Box>,
+      )
+
     const cardsById: Record<string, RenderChildren> = {
+      plan: planCard,
       actions: actionsCard,
       context: contextCard,
       shortcuts: shortcutsCard,
